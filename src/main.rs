@@ -1,83 +1,70 @@
 use std::{
-        fs::read, io::{ self, BufRead, Write},
-        net::{TcpListener, TcpStream}, 
-        str::Bytes, 
-        sync::{Arc, Mutex, mpsc:: {self, Receiver, Sender, channel}},
-        thread
-    };
+    io::{BufRead, BufReader, Write},
+    net::{TcpListener, TcpStream},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Sender},
+    },
+    thread,
+};
 
 fn main() {
+    let listener = TcpListener::bind("127.0.0.1:8080")
+        .expect("Failed to bind");
 
-    let listener = TcpListener::bind("127.0.0.1:8080");
-    let mut connections: Vec<TcpStream> = vec![];
-    let (sender, receiver) = mpsc::channel();
-    //let (sender, receiver) = channel()::<u8>;
-    let receiver  = Arc::new(Mutex::new(receiver));
+    let (tx, rx) = mpsc::channel::<String>();
 
+    // shared list of clients
+    let clients: Arc<Mutex<Vec<TcpStream>>> =
+        Arc::new(Mutex::new(Vec::new()));
 
-    match listener {
-        Ok(listener) => {
-           for connection in listener.incoming() {
-               let mut connection = connection.unwrap();
+    let clients_broadcast = Arc::clone(&clients);
 
-               // cloned for sending messages back to this client
-               let this_receiver = Arc::clone(&receiver);
-               connections.push(connection.try_clone().expect("Failed to clone stream"));
-               let this_sender = sender.clone();
-                thread::spawn( move || {
-                    handle_connection(&mut connection, this_sender, this_receiver);
-                });
-           }
+    // BROADCAST THREAD
+    thread::spawn(move || {
+        while let Ok(msg) = rx.recv() {
+            println!("Broadcasting: {}", msg);
+
+            let mut clients = clients_broadcast.lock().unwrap();
+
+            clients.retain(|client| {
+                let mut client = client.try_clone().unwrap();
+
+                match client.write_all(msg.as_bytes()) {
+                    Ok(_) => true,
+                    Err(_) => false, // drop dead connections
+                }
+            });
         }
+    });
 
-        Err(e) => {
-            println!("Error occured: {}", e)
-        }
+    // ACCEPT LOOP
+    for stream in listener.incoming() {
+        let stream = stream.unwrap();
+        let tx = tx.clone();
+        let clients = Arc::clone(&clients);
+
+        // store client
+        clients.lock().unwrap().push(stream.try_clone().unwrap());
+
+        thread::spawn(move || {
+            handle_connection(stream, tx);
+        });
     }
-
-
-
-    // The main thread receives messages from all spawned threads and broadcasts them
-    for message in receiver.lock().unwrap().recv() {
-        for connection in &mut connections {
-            connection.write_all(&message).unwrap()
-        }
-    }
-    
 }
 
-
-fn handle_connection(
-    stream: &mut TcpStream,
-    sender: Sender<Vec<u8>>,
-    receiver: Arc<Mutex<Receiver<Vec<u8>>>>,
-) {
-    println!("Got stream: {:?}", stream);
-    println!("Type message...");
-
-    let mut input = String::new();
-
-    // Read input from stdin
-    io::stdin()
-        .read_line(&mut input)
-        .expect("Failed to read line");
-
-    // Send through channel
-    sender
-        .send(input.into_bytes())
-        .expect("Failed to send message");
+fn handle_connection(stream: TcpStream, sender: Sender<String>) {
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
 
     loop {
-        // Receive message from channel
-        let msg = receiver
-            .lock()
-            .unwrap()
-            .recv()
-            .expect("Failed to receive message");
+        line.clear();
 
-        // Write message to TCP stream
-        stream
-            .write_all(&msg)
-            .expect("Failed to write to stream");
+        let bytes = reader.read_line(&mut line).unwrap();
+        if bytes == 0 {
+            break;
+        }
+
+        sender.send(line.clone()).unwrap();
     }
 }
