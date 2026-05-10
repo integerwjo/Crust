@@ -1,44 +1,28 @@
 use std::{
           net::{TcpStream, TcpListener},
-          sync::{mpsc::{self, Sender, Receiver}, {Arc, Mutex}},
           thread,
           io::{Write,Read},
 };
+use std::sync::{Arc, Mutex};
 
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:8080").expect("Failed to bind to port");
 
-    let (tx, _rx) = mpsc::channel::<String>();
-    // holds all the streams
     let clients: Arc::<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
 
     let mut handles = Vec::new();
 
 
-
-    // This thread will listen for incomming messages and print them
-    // 
-    /*
-    thread::spawn(move || {
-        while let Ok(msg) = rx.recv() {
-            for client in clients {
-                client.write_all(msg.as_bytes()).expect("Failed to broadcast");
-            }
-        }
-        
-    }); */
-    
     for stream in listener.incoming() {
         // clone the transmitter
         let streams = Arc::clone(&clients);
-        let transmitter = tx.clone();
         let stream = stream.unwrap();
         let stream_clone = stream.try_clone().expect("Cloning stream failed");
         clients.lock().unwrap().push(stream_clone);
 
         // a thread to handle incoming connection
         let handle = thread::spawn( move || {
-            handle_stream(stream, transmitter, streams);
+            handle_stream(stream, streams);
         });
         handles.push(handle);
     }
@@ -49,8 +33,7 @@ fn main() {
     }
 }
 
-fn handle_stream(mut stream: TcpStream, _transmitter: Sender<String>,
-    clients: Arc<std::sync::Mutex<Vec<TcpStream>>>) {
+fn handle_stream(mut stream: TcpStream, clients: Arc<std::sync::Mutex<Vec<TcpStream>>>) {
     println!("{:?}", stream);
     println!("Our side of the connection: {:?}", stream.local_addr());
     println!("The other side of the connection: {:?}", stream.peer_addr());
@@ -77,9 +60,9 @@ fn handle_stream(mut stream: TcpStream, _transmitter: Sender<String>,
     // instead of sending it to the main thread, we let the spawned threads handle 
     // writing because they have access to the stream
 
-    let clients = clients.lock().unwrap();
+    let mut clients = clients.lock().unwrap();
 
-    for mut client in clients.iter() {
+    for client in clients.iter_mut() {
         client.write_all(received.as_bytes()).expect("Failed to transmit");
     }
     
